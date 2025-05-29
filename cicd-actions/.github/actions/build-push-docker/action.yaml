@@ -1,0 +1,44 @@
+name: 'Build and Push Docker Image'
+description: 'Builds, pushes, and scans a Docker image for a microservice'
+inputs:
+  service-name:
+    description: 'Name of the microservice'
+    required: true
+  ecr-registry:
+    description: 'AWS ECR registry URL'
+    required: true
+  environment:
+    description: 'Target environment'
+    required: true
+outputs:
+  image-tag:
+    description: 'The generated Docker image tag'
+    value: ${{ steps.build.outputs.image-tag }}
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Login to Amazon ECR
+      uses: aws-actions/amazon-ecr-login@v2
+      with:
+        registry: ${{ inputs.ecr-registry }}
+
+    - name: Build and Push Docker Image
+      uses: docker/build-push-action@v6
+      with:
+        context: ${{ inputs.service-name }}
+        push: true
+        tags: |
+          ${{ inputs.ecr-registry }}/${{ inputs.service-name }}:${{ github.sha }}
+          ${{ inputs.ecr-registry }}/${{ inputs.service-name }}:latest
+      id: build
+
+    - name: Scan Image with Trivy
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: ${{ inputs.ecr-registry }}/${{ inputs.service-name }}:${{ github.sha }}
+        format: table
+        exit-code: 1
+        severity: CRITICAL,HIGH

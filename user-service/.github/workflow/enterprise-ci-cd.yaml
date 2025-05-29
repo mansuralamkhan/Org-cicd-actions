@@ -1,0 +1,74 @@
+name: Enterprise CI/CD Pipeline
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ECR_REGISTRY: 123456789012.dkr.ecr.us-east-1.amazonaws.com
+  SONAR_HOST_URL: https://sonarqube.example.com
+  HELM_REPO: github.com/your-org/helm-repo
+  HELM_REPO_NAME: helm-repo
+  EKS_CLUSTER_NAME: your-eks-cluster
+  AWS_REGION: us-east-1
+
+jobs:
+  ci:
+    strategy:
+      matrix:
+        service: [account-service, transaction-service, user-service]
+        environment: [staging, prod]
+    uses: org/cicd-actions/.github/workflows/ci-pipeline.yml@main
+    with:
+      service-name: ${{ matrix.service }}
+      environment: ${{ matrix.environment }}
+      ecr-registry: ${{ env.ECR_REGISTRY }}
+      sonar-host-url: ${{ env.SONAR_HOST_URL }}
+    secrets:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+  update-helm-repo:
+    runs-on: self-hosted
+    needs: ci
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    strategy:
+      matrix:
+        service: [account-service, transaction-service, user-service]
+    steps:
+      - name: Checkout Helm Repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.HELM_REPO }}
+          ref: main
+          token: ${{ secrets.HELM_REPO_TOKEN }}
+
+      - name: Update Helm Chart Image Tag
+        run: |
+          cd charts/${{ matrix.service }}
+          yq eval -i '.image.tag = "${{ github.sha }}"' values.yaml
+          yq eval -i '.image.repository = "${{ env.ECR_REGISTRY }}/${{ matrix.service }}"' values.yaml
+
+      - name: Commit and Push Changes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add charts/${{ matrix.service }}/values.yaml
+          git commit -m "Update ${{ matrix.service }} image tag to ${{ github.sha }}"
+          git push origin main
+
+      - name: Trigger ArgoCD Sync
+        env:
+          ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
+          ARGOCD_TOKEN: ${{ secrets.ARGOCD_TOKEN }}
+        run: |
+          curl -s -X POST \
+            -H "Authorization: Bearer ${{ secrets.ARGOCD_TOKEN }}" \
+            "${{ secrets.ARGOCD_SERVER }}/api/v1/applications/${{ matrix.service }}/sync" \
+            -d '{"revision": "main", "prune": true}'

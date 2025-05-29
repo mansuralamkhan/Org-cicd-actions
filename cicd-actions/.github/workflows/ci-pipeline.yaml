@@ -1,0 +1,109 @@
+name: Reusable CI Pipeline
+on:
+  workflow_call:
+    inputs:
+      service-name:
+        description: 'Name of the microservice'
+        required: true
+        type: string
+      environment:
+        description: 'Target environment (dev, staging, prod)'
+        required: true
+        type: string
+      ecr-registry:
+        description: 'AWS ECR registry URL'
+        required: true
+        type: string
+      sonar-host-url:
+        description: 'SonarQube host URL'
+        required: true
+        type: string
+    secrets:
+      SONAR_TOKEN:
+        description: 'SonarQube token'
+        required: true
+      AWS_ACCESS_KEY_ID:
+        description: 'AWS access key ID'
+        required: true
+      AWS_SECRET_ACCESS_KEY:
+        description: 'AWS secret access key'
+        required: true
+    outputs:
+      image-tag:
+        description: 'Docker image tag'
+        value: ${{ jobs.ci.outputs.image-tag }}
+
+jobs:
+  ci:
+    runs-on: self-hosted
+    environment: ${{ inputs.environment }}
+    outputs:
+      image-tag: ${{ steps.build-push.outputs.image-tag }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Needed for SonarQube
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Cache Maven Dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-maven-${{ hashFiles(format('{0}/pom.xml', inputs.service-name)) }}
+          restore-keys: ${{ runner.os }}-maven-
+
+      - name: Cache SonarQube
+        uses: actions/cache@v4
+        with:
+          path: ~/.sonar/cache
+          key: ${{ runner.os }}-sonar
+          restore-keys: ${{ runner.os }}-sonar
+
+      - name: Run Linter
+        run: |
+          cd ${{ inputs.service-name }}
+          mvn spotless:check
+
+      - name: Run Unit Tests
+        run: |
+          cd ${{ inputs.service-name }}
+          mvn test
+
+      - name: Run SonarQube Analysis
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          cd ${{ inputs.service-name }}
+          mvn -B verify org.sonarsource.scanner.maven:sonar-maven-plugin:sonar \
+            -Dsonar.projectKey=${{ inputs.service-name }} \
+            -Dsonar.host.url=${{ inputs.sonar-host-url }} \
+            -Dsonar.login=${{ secrets.SONAR_TOKEN }}
+
+      - name: Check SonarQube Quality Gate
+        uses: sonarsource/sonarqube-quality-gate-action@v1
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          scan: ${{ inputs.service-name }}
+
+      - name: Run Dependency Check
+        run: |
+          cd ${{ inputs.service-name }}
+          mvn org.owasp:dependency-check-maven:check
+
+      - name: Build and Push Docker Image
+        uses: org/cicd-actions/.github/actions/build-push-docker@v1
+        id: build-push
+        with:
+          service-name: ${{ inputs.service-name }}
+          ecr-registry: ${{ inputs.ecr-registry }}
+          environment: ${{ inputs.environment }}
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}

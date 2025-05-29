@@ -1,0 +1,132 @@
+name: 'Build and Push Docker Image'
+description: "Build, pushes, and scans a Docker image for a microservice"
+inputs:
+  service-name:
+    description: 'Name of the micorservice'
+    required: true
+  ecr-registry:
+    description: 'AWS ECR registry URL'
+    required: true
+  environment:
+    description: 'Target Environment'
+    required: true
+outputs:
+  image-tag:
+    description: 'The generated Docker image tag'
+    value: ${{ steps.build.output.image-tag }}
+  runs:
+    using: 'composite'
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v3
+        with:
+          registry: ${{ inputs.ecr-registry }}
+      - name: Build and Push Docker Image
+        uses: docker/build-push-actions@v6
+        with:
+          context: ${{ inputs.service-name }}
+          push: true
+          tags: |
+            ${{ inputs.ecr-registry }}/${{ inputs.service-name }}:${{ github.sha }}
+            ${{ inputs.ecr-registry }}/${{ inputs.service-name }}: latest
+      - name: Scan Image with Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ inputs.ecr-registry }}/${{ inputs.service }}:${{ github.sha}}
+          format: table
+          exit-code: 1
+          severity: CRITICAL,HiGH
+
+
+---
+
+on:
+  workflow_call:
+    secrets:
+      SONAR_TOKEN: 
+      AWS_ACCESS_KEY_ID:
+        description: 'AWS secret access key ID'
+        required: true
+      AWS_SECRET_ACCESS_KEY:
+        description: 'AWS secret access key'
+        required: true
+    outputs:
+      image-tag:
+        description: 'Docker image tag'
+        value: ${{ jobs.ci.output.image-tag }}
+jobs:
+  ci:
+    runs-on: self-hosted
+    environment: ${{ inputs.environment }}
+    outputs:
+      image-tag: ${{ steps.build-push.outputs.image-tag }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout#v4
+        with:
+          fetch-depth: 0 #Needed for SonarQube
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+      - name: Cache Maven Dependencies
+        uses:
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-maven-${{ hashfiles(format('{0}'/pom.xml', inputs.service-name))}}
+          restory-keys: ${{ runner.os }}
+
+      - name: Cache SoanrQube
+        uses: actions/cache@v4
+        with:
+          path: ~/.sonar/cache
+          key: ${{ runner.os }}-soanr
+          restore-keys: ${{ runner.os }}-sonar
+      - name: Run Linter
+        run: |
+        cd ${{ inputs.service-name }}
+        mvn spotless:chek
+      - name: Run Unit test
+        run: |
+        cd ${{ inputs.service-name }}
+        mvn test
+      
+      - name: Run SonarQube Analysis
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run:
+          cd ${{ inputs.service-name }}
+          mvn -B verify.org.sonarsource.scanner.maven:sonar-maven-plugin:sonar \
+            -Dsonar.projectKey=${{ inputs.service-name }}
+            -Dsonar.host.url=${{ inputs.sonar-host-url }}
+            -Dsonar.login=${{ secrets.SONAR_TOKEN }}
+
+      - name: Check SonarQube Quality Gate
+        uses: sonarsource/sonarqube-quality-gate-actions@v1
+        env:
+          scan: ${{ inputs.service-name}}
+        with:
+          scan: ${{ inputs.service-name }}
+
+      - name: Run Dependency Check
+        run: |
+          cd ${{ inputs.service-name }}
+          mvn org.owasp:dependency-check-maven:check
+
+      - name: Build and Push Docker Image
+        uses: org/cicd-actions/.github/actions/build-push-docker@v1
+        id: build-push
+        with:
+          service-name: ${{ inputs.service-name }}
+          ecr-registry: ${{ inputs.ecr-registry }}
+          environment: ${{ inputs.environment }}
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          
+
+      
