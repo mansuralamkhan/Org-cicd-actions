@@ -72,3 +72,5 @@ jobs:
             -H "Authorization: Bearer ${{ secrets.ARGOCD_TOKEN }}" \
             "${{ secrets.ARGOCD_SERVER }}/api/v1/applications/${{ matrix.service }}/sync" \
             -d '{"revision": "main", "prune": true}'
+
+#
